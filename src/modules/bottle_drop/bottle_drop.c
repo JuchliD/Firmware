@@ -70,6 +70,8 @@ PARAM_DEFINE_FLOAT(BD_GPROPERTIES, 0.03f);
 PARAM_DEFINE_FLOAT(BD_TURNRADIUS, 70.0f);
 PARAM_DEFINE_FLOAT(BD_PRECISION, 1.0f);
 PARAM_DEFINE_INT32(BD_APPROVAL, 0);
+PARAM_DEFINE_INT32(BD_MDROP, 0);
+PARAM_DEFINE_FLOAT(BD_PRECISIONANG, 10.0f/180*M_PI_F);
 
 
 
@@ -168,6 +170,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 	float turn_radius;	// turn radius of the UAV
 	float precision;	// Expected precision of the UAV
 	bool drop_approval;	// if approval is given = true, otherwise = false
+	bool mdrop;		// manual drop
+	float precision_angle;  // is the allowed deviation from the flight path in degrees
 
 	thread_running = true;
 
@@ -205,8 +209,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 
 	// Has to be estimated by experiment
 	float cd = 0.86f;              	// Drag coefficient for a cylinder with a d/l ratio of 1/3 []
-	float t_signal = 0.084f;	// Time span between sending the signal and the bottle top reaching level height with the bottom of the plane [s]
-	float t_door = 0.7f;		// The time the system needs to open the door + safety, is also the time the palyload needs to safely escape the shaft [s]
+	float t_signal = 0.13f;		// Time span between sending the signal and the bottle actual release [s]
+	float t_door = 1.0f;		// The time the system needs to open the door + safety, is also the time the palyload needs to safely escape the shaft [s]
 
 
 	// Definition
@@ -246,6 +250,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 	param_t param_turn_radius = param_find("BD_TURNRADIUS");
 	param_t param_precision = param_find("BD_PRECISION");
 	param_t param_approval = param_find("BD_APPROVAL");
+	param_t param_drop = param_find("BD_MDROP");
+	param_t param_precision_angle = param_find("BD_PRECISIONANG");
 
 
 	param_get(param_approval, &drop_approval);
@@ -253,6 +259,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 	param_get(param_turn_radius, &turn_radius);
 	param_get(param_height, &height);
 	param_get(param_gproperties, &z_0);
+	param_get(param_drop, &mdrop);
+	param_get(param_precision_angle, &precision_angle);
 
 
 	struct vehicle_attitude_s att;
@@ -331,7 +339,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 			param_get(param_turn_radius, &turn_radius);
 			param_get(param_approval, &drop_approval);
 			param_get(param_precision, &precision);
-
+			param_get(param_drop, &mdrop);
+			param_get(param_precision_angle, &precision_angle);
 
 			}
 
@@ -376,12 +385,11 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 
 
 					// Compute the distance the bottle will travel after it is dropped in body frame coordinates --> x
-					while( h > 0.05f)
+					while( h > 0.0f)
 					{
 						// z-direction
 						vz = vz + az*dt;
 						z = z + vz*dt;
-						h = h_0 - z;
 
 						// x-direction
 						vw = vr*logf(h/z_0)/logf(wind_speed.altitude/z_0);
@@ -398,6 +406,8 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 						//acceleration
 						az = g - Fdz/m;
 						ax = -Fdx/m;
+
+						h = h_0 - z;
 					}
 					// Compute Drop point
 					x = sqrtf(powf(globalpos.vx,2.0f) + powf(globalpos.vy,2.0f))*t_signal + x;
@@ -463,25 +473,26 @@ int bottle_drop_thread_main(int argc, char *argv[]) {
 
 			}
 
-			if(isfinite(distance_real) && distance_real < distance_open_door && drop_approval)
+			if(isfinite(distance_real) && distance_real < distance_open_door && drop_approval || mdrop)
 			{
-				actuators.control[0] = -1.0f;	// open door
-				actuators.control[1] = 1.0f;
+				actuators.control[0] = -8.0f;	// open door
+				actuators.control[1] = 8.0f;
+				usleep(600);
 				state_door = true;
 				warnx("open doors");
 			}
 			else
 			{		// closed door and locked survival kit
-				actuators.control[0] = 0.5f;
-				actuators.control[1] = -0.5f;
-				actuators.control[2] = -0.5f;
+				actuators.control[0] = 0.7f;
+				actuators.control[1] = -0.7f;
+				actuators.control[2] = 0.1f;
 				state_door = false;
 			}
-			if(isfinite(distance_real) && distance_real < precision && distance_real < future_distance && state_door)  // Drop only if the distance between drop point and actual position is getting larger again
+			if(isfinite(distance_real) && distance_real < precision && distance_real < future_distance && state_door || (mdrop && state_door))  // Drop only if the distance between drop point and actual position is getting larger again
 			{
-				if(fabsf(_wrap_pi(globalpos.yaw-atan2f(wind_speed.vy,wind_speed.vx)+M_PI_F)) < 10.0f/180.0f*M_PI_F) // if flight trajectory deviates more than 10 degrees from calculated path, it will no drop
+				if(fabsf(_wrap_pi(globalpos.yaw-atan2f(wind_speed.vy,wind_speed.vx)+M_PI_F)) < precision_angle || mdrop) // if flight trajectory deviates more than 10 degrees from calculated path, it will no drop
 				{
-					actuators.control[2] = 0.5f;
+					actuators.control[2] = -0.5f;
 					state_drop = true;
 					state_run = true;
 					warnx("dropping now");
